@@ -9849,7 +9849,7 @@ public:
     delete this;
   }
 
-private:
+//private:
   Client *clnt;
   Context *onfinish;
   Context *onuninline;
@@ -9960,6 +9960,9 @@ struct CRF_onuninline : public Context {
     : CRF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CRF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CRF->clnt->cct, 3) << "CRF_onuninline::finish r = " << r << dendl;
     CRF->finish_onuninline(r);
     complete(r);
   }
@@ -9972,6 +9975,9 @@ struct CRF_iofinish : public Context {
     : CRF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CRF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CRF->clnt->cct, 3) << "CRF_iofinish::finish r = " << r << dendl;
     CRF->finish_io(r);
   }
   // For _read_async, we may not finish in one go, so be prepared for multiple
@@ -10031,15 +10037,33 @@ void Client_Read_Sync_Async::retry()
 
   ldout(clnt->cct, 3) << "Client_Read_Sync_Async::retry" << dendl;
 
+  ldout(clnt->cct, 3) << "About to call read_trunc tbl.length() "
+                      << tbl.length()
+                      << " tbl " << &tbl
+                      << " left " << left
+                      << " pos " << pos
+                      << dendl;
   filer->read_trunc(in->ino, &in->layout, in->snapid, pos, left, &tbl, 0,
                     in->truncate_size, in->truncate_seq, this);
+
+  ldout(clnt->cct, 3) << "Returned from read_trunc tbl.length() "
+                      << tbl.length()
+                      << " tbl " << &tbl
+                      << " left " << left
+                      << " pos " << pos
+                      << dendl;
 }
 
 void Client_Read_Sync_Async::finish(int r)
 {
   client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
 
-  ldout(clnt->cct, 3) << "Client_Read_Sync_Async::finish r = " << r << dendl;
+  ldout(clnt->cct, 3) << "Client_Read_Sync_Async::finish r = " << r 
+                      << " left " << left
+                      << " wanted " << wanted
+                      << " read " << read
+                      << " pos " << pos
+                      << dendl;
 
   clnt->client_lock.lock();
 
@@ -10052,17 +10076,35 @@ void Client_Read_Sync_Async::finish(int r)
   }
 
   if (tbl.length()) {
+    ldout(clnt->cct, 3) << "tbl.length() " << tbl.length()
+                        << " tbl " << &tbl
+                        << " left " << left
+                        << " wanted " << wanted
+                        << " read " << read
+                        << " pos " << pos
+                        << dendl;
     r = tbl.length();
 
     read += r;
     pos += r;
     left -= r;
     bl->claim_append(tbl);
+    ldout(clnt->cct, 3) << "bl->length() " << bl->length()
+                        << " bl " << bl
+                        << " left " << left
+                        << " wanted " << wanted
+                        << " read " << read
+                        << " pos " << pos
+                        << dendl;
   }
 
   // short read?
   if (r >= 0 && r < wanted) {
+    ldout(clnt->cct, 3) << "short read" << dendl;
     if (pos < in->size) {
+      ldout(clnt->cct, 3) << "short read pos " << pos
+                          << " in->size " << in->size
+                          << dendl;
       // zero up to known EOF
       int64_t some = in->size - pos;
       if (some > left)
@@ -10080,14 +10122,17 @@ void Client_Read_Sync_Async::finish(int r)
     clnt->put_cap_ref(in, CEPH_CAP_FILE_RD);
     // reverify size
     {
+      ldout(clnt->cct, 3) << "reverify size" << dendl;
       r = clnt->_getattr(in, CEPH_STAT_CAP_SIZE, f->actor_perms);
       if (r < 0)
         goto error;
     }
 
     // eof?  short read.
-    if ((uint64_t)pos >= in->size)
+    if ((uint64_t)pos >= in->size) {
+      ldout(clnt->cct, 3) << "eof?  short read." << dendl;
       goto success;
+    }
 
     {
       int have2 = 0;
@@ -10098,6 +10143,7 @@ void Client_Read_Sync_Async::finish(int r)
     }
 
     wanted = left;
+    ldout(clnt->cct, 3) << "wanted " << left << dendl;
     retry();
     clnt->client_lock.unlock();
     return;
@@ -10109,6 +10155,7 @@ success:
 
 error:
 
+  ldout(clnt->cct, 3) << "calling onfinish->complete(r) r " << r << dendl;
   onfinish->complete(r);
   fini = true;
 
@@ -10227,6 +10274,7 @@ retry:
     if (f->flags & O_RSYNC) {
       _flush_range(in, offset, size);
     }
+    ldout(cct, 3) << "calling _read_async" << dendl;
     rc = _read_async(f, offset, size, bl, iofinish.get());
 
     if (onfinish) {
@@ -10440,6 +10488,7 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
     Context *crf = io_finish.release();
     if (r != 0) {
       // need to do readahead, so complete the crf
+      ldout(cct, 10) << "calling crf->complete(r) r = " << r << dendl;
       client_lock.unlock();
       crf->complete(r);
       client_lock.lock();
@@ -10601,10 +10650,10 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
         return w;
     } else {
         bufferlist bl;
-        ldout(cct, 3) << "calling preadv(" << fh << ", " <<  offset << ")" << dendl;
+        ldout(cct, 3) << "calling _read(" << fh << ", " <<  offset << ")" << dendl;
         int64_t r = _read(fh, offset, totallen, blp ? blp : &bl,
                           onfinish);
-        ldout(cct, 3) << "preadv(" << fh << ", " <<  offset << ") = " << r << dendl;
+        ldout(cct, 3) << "_read(" << fh << ", " <<  offset << ") = " << r << dendl;
         if (r <= 0) {
           if (r < 0 && onfinish != nullptr) {
             client_lock.unlock();
@@ -10708,7 +10757,7 @@ public:
     delete this;
   }
 
-private:
+//private:
   Client *clnt;
   Context *onfinish;
   Context *onuninline;
@@ -10788,7 +10837,12 @@ bool Client_Write_Finisher::try_complete()
 {
   client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
 
-  ldout(clnt->cct, 3) << "Client_Write_Finisher::try_complete" << dendl;
+  ldout(clnt->cct, 3) << "Client_Write_Finisher::try_complete"
+        << " onuninlinefinished=" << onuninlinefinished
+        << " onuninlinefinished_r=" << onuninlinefinished_r
+        << " iofinished=" << iofinished
+        << " iofinished_r=" << iofinished_r
+        << dendl;
 
   if (onuninlinefinished && iofinished) {
     clnt->put_cap_ref(in, CEPH_CAP_FILE_WR);
@@ -10809,6 +10863,9 @@ struct CWF_onuninline : public Context {
     : CWF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CWF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CWF->clnt->cct, 3) << "CWF_onuninline::finish" << dendl;
     CWF->finish_onuninline(r);
   }
 };
@@ -10820,6 +10877,9 @@ struct CWF_iofinish : public Context {
     : CWF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CWF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CWF->clnt->cct, 3) << "CWF_iofinish::finish" << dendl;
     CWF->finish_io(r);
   }
 };
@@ -10993,6 +11053,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     // async, caching, non-blocking.
+    ldout(cct, 3) << "calling file_write" << dendl;
     r = objectcacher->file_write(&in->oset, &in->layout,
 				 in->snaprealm->get_snap_context(),
 				 offset, size, bl, ceph::real_clock::now(),
@@ -15041,6 +15102,7 @@ int Client::ll_preadv_pwritev(struct Fh *fh, const struct iovec *iov, int iovcnt
       return -CEPHFS_ENOTCONN;
 
     std::scoped_lock cl(client_lock);
+    ldout(cct, 3) << "calling _preadv_pwritev_locked write? " << write << dendl;
     return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true,
     				  onfinish, bl);
 }
